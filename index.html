@@ -2,6 +2,7 @@
 <html>
 <head>
     <title></title>
+
     <style>
         html, body {
             margin: 0;
@@ -11,32 +12,94 @@
             overflow: hidden;
         }
 
+        #startScreen {
+            position: fixed;
+            inset: 0;
+            background: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+
+        #playButton {
+            width: 90px;
+            height: 90px;
+            border: none;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            position: relative;
+        }
+
+        #playButton::after {
+            content: "";
+            position: absolute;
+            left: 36px;
+            top: 27px;
+            border-top: 18px solid transparent;
+            border-bottom: 18px solid transparent;
+            border-left: 27px solid black;
+        }
+
+        #playButton:hover {
+            transform: scale(1.08);
+        }
+
         video {
             width: 100%;
             height: 100%;
             object-fit: contain;
+            display: none;
         }
     </style>
 </head>
+
 <body>
 
-    <video id="video" preload="auto" loop>
-        <source src="beast.mp4" type="video/mp4">
-    </video>
+    <div id="startScreen">
+        <button id="playButton" aria-label="Play"></button>
+    </div>
+
+    <video id="video" preload="auto" loop></video>
 
     <script>
         const video = document.getElementById("video");
+        const startScreen = document.getElementById("startScreen");
+        const playButton = document.getElementById("playButton");
 
-        document.addEventListener("click", async () => {
+        const videos = [
+            "HEYYEYAAEYAAAEYAEYAA.mp4",
+            "beast.mp4"
+        ];
+
+        playButton.addEventListener("click", async () => {
+
+            // Pick a random video (50/50)
+            const randomVideo =
+                videos[Math.floor(Math.random() * videos.length)];
+
+            video.src = randomVideo;
+            video.style.display = "block";
+            startScreen.style.display = "none";
+
+            // Enter fullscreen
             try {
                 await document.documentElement.requestFullscreen();
             } catch (error) {
                 console.log("Fullscreen unavailable:", error);
             }
 
+            // Play with sound
             video.muted = false;
-            video.play();
-        }, { once: true });
+            video.volume = 1.0;
+
+            try {
+                await video.play();
+            } catch (error) {
+                console.log("Playback error:", error);
+            }
+        });
     </script>
 
 </body>
