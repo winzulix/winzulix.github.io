@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Don't Touch the Enemies</title>
+    <style>
+        @font-face {
+            font-family: "Octosquares";
+            src: url("./OctosquaresTrialMedium.ttf") format("truetype");
+            font-weight: 500;
+            font-style: normal;
+            font-display: swap;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050508;
+            color: #ffffff;
+            font-family: "Octosquares", "Segoe UI", system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Container that forces centering and precise 16:9 aspect ratio locking */
+        #game-wrapper {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #050508;
+            overflow: hidden;
+        }
+
+        /* Ambient blurred canvas stretching to fill the outer background */
+        #ambientCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter: blur(28px) brightness(0.75) contrast(1.2);
+            opacity: 0.85;
+            transform: scale(1.1);
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        #startOverlay {
+            position: absolute;
+            inset: 0;
+            z-index: 5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(5, 5, 8, 0.96);
+            cursor: pointer;
+            text-align: center;
+        }
+        #startOverlay h1 { font-size: 52px; margin-bottom: 16px; }
+        #startOverlay p { font-size: 22px; opacity: 0.85; }
+
+        /* Canvas strictly locked to 16:9 aspect ratio */
+        canvas#gameCanvas {
+            position: relative;
+            z-index: 2;
+            display: block;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 200, 200, 0.15);
+            border-radius: 4px;
+            background-color: #0f0f0f;
+            /* Scaled via JS for pixel perfection while retaining logical 1280x720 canvas size */
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-wrapper">
+    <div id="startOverlay"><div><h1>Click to Play</h1><p>WASD / Arrow Keys &bull; Avoid the red enemies</p></div></div>
+    <canvas id="ambientCanvas" width="320" height="180"></canvas>
+    <canvas id="gameCanvas" width="1280" height="720"></canvas>
+</div>
+
+<script>
+/**
+ * Don't Touch the Enemies - HTML5 Canvas Engine
+ * Replicates all Pygame mechanics with ambient background mirroring for letterbox/pillarbox areas.
+ */
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const ambientCanvas = document.getElementById("ambientCanvas");
+const ambientCtx = ambientCanvas.getContext("2d");
+
+// Optional sound effects and background music, stored beside this HTML file.
+const hitSound = new Audio("./sfx/hit.mp3");
+const oofSound = new Audio("./sfx/oof.mp3");
+const songs = [new Audio("./songs/song1.mp3"), new Audio("./songs/song2.mp3")];
+[hitSound, oofSound, ...songs].forEach(audio => { audio.preload = "auto"; });
+songs.forEach(song => { song.loop = true; });
+
+let audioUnlocked = false;
+let currentSong = null;
+let musicFallbackUsed = false;
+
+function playSound(audio) {
+    if (!audioUnlocked) return;
+    audio.currentTime = 0;
+    audio.play().catch(() => {}); // Missing optional files won't interrupt gameplay.
+}
+
+function stopMusic() {
+    if (currentSong) {
+        currentSong.pause();
+        currentSong.currentTime = 0;
+        currentSong = null;
+    }
+}
+
+function startRandomMusic() {
+    stopMusic();
+    if (!audioUnlocked) return;
+
+    // Pick either track with equal probability. If the chosen file is missing,
+    // try the other one so having only one song still works.
+    const firstIndex = Math.random() < 0.5 ? 0 : 1;
+    const first = songs[firstIndex];
+    const second = songs[1 - firstIndex];
+    musicFallbackUsed = false;
+    currentSong = first;
+    first.currentTime = 0;
+    first.play().catch(() => {
+        if (currentSong !== first || musicFallbackUsed) return;
+        musicFallbackUsed = true;
+        currentSong = second;
+        second.currentTime = 0;
+        second.play().catch(() => {
+            if (currentSong === second) currentSong = null;
+        });
+    });
+}
+
+// Native Virtual Dimensions (Logical coordinate space matching Pygame source)
+const VIRTUAL_WIDTH = 1280;
+const VIRTUAL_HEIGHT = 720;
+const ASPECT_RATIO = VIRTUAL_WIDTH / VIRTUAL_HEIGHT; // 16:9
+const CHECK_SIZE = 40;
+
+// Game Settings
+const PLAYER_SIZE = 30;
+const ENEMY_SIZE = 30;
+const SPAWN_DELAY = 1500;            // ms
+const TELEGRAPH_DURATION = 800;       // ms
+const TRAIL_SPAWN_DELAY = 6;         // ms
+const ENEMY_TRAIL_SPAWN_DELAY = 10;   // ms
+const MAX_TRAIL = 300;
+const MAX_ENEMY_TRAIL = 300;
+const SPEED = 6;
+
+// Colors
+const TEAL = "#008080";
+const DARK_TEAL = "#005050";
+const RED = "#c80000";
+const DARK_RED = "#780000";
+const WHITE = "#ffffff";
+const BLACK = "#0f0f0f";
+const DARK_GREY = "#232323";
+
+// Resize Canvas to maintain strict 16:9 ratio in any window
+function resizeCanvas() {
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    const windowRatio = windowWidth / windowHeight;
+
+    let displayWidth, displayHeight;
+
+    if (windowRatio > ASPECT_RATIO) {
+        // Window is wider than 16:9 -> pillarbox left/right
+        displayHeight = windowHeight;
+        displayWidth = windowHeight * ASPECT_RATIO;
+    } else {
+        // Window is taller than 16:9 -> letterbox top/bottom
+        displayWidth = windowWidth;
+        displayHeight = windowWidth / ASPECT_RATIO;
+    }
+
+    canvas.style.width = `${Math.floor(displayWidth)}px`;
+    canvas.style.height = `${Math.floor(displayHeight)}px`;
+}
+
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// Key Tracking
+const keys = {};
+window.addEventListener("keydown", (e) => {
+    keys[e.code] = true;
+
+    if ((e.code === "KeyR" || e.key === "r" || e.key === "R") && game.gameOver) {
+        resetGame();
+    }
+    if ((e.code === "KeyP" || e.key === "p" || e.key === "P") && !game.gameOver) {
+        game.paused = !game.paused;
+    }
+});
+
+window.addEventListener("keyup", (e) => {
+    keys[e.code] = false;
+});
+
+// Game State & Records
+let highScore = 0;
+let attempts = [];
+let game = {};
+
+// Background Pre-render Canvas
+const bgCanvas = document.createElement("canvas");
+bgCanvas.width = VIRTUAL_WIDTH;
+bgCanvas.height = VIRTUAL_HEIGHT;
+const bgCtx = bgCanvas.getContext("2d");
+
+for (let y = 0; y < VIRTUAL_HEIGHT; y += CHECK_SIZE) {
+    for (let x = 0; x < VIRTUAL_WIDTH; x += CHECK_SIZE) {
+        const isEven = (Math.floor(x / CHECK_SIZE) + Math.floor(y / CHECK_SIZE)) % 2 === 0;
+        bgCtx.fillStyle = isEven ? BLACK : DARK_GREY;
+        bgCtx.fillRect(x, y, CHECK_SIZE, CHECK_SIZE);
+    }
+}
+
+function resetGame() {
+    const now = performance.now();
+    game = {
+        playerX: VIRTUAL_WIDTH / 2,
+        playerY: VIRTUAL_HEIGHT / 2,
+        health: 5,
+        enemies: [],
+        telegraphs: [],
+        lastSpawnTime: now,
+        startTime: now,
+        flashAlpha: 0,
+        flashStartTime: 0,
+        gameOver: false,
+        playerPieces: [],
+        finalSurvivalTime: null,
+        trail: [],
+        enemyTrail: [],
+        lastTrailTime: 0,
+        lastEnemyTrailTime: 0,
+        paused: false
+    };
+    if (audioUnlocked) startRandomMusic();
+}
+
+function createPlayerPieces(x, y, count = 24) {
+    const pieces = [];
+    const cx = x + PLAYER_SIZE / 2;
+    const cy = y + PLAYER_SIZE / 2;
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speedVal = Math.random() * 6 + 4;
+        pieces.push({
+            x: cx,
+            y: cy,
+            vx: Math.cos(angle) * speedVal,
+            vy: Math.sin(angle) * speedVal,
+            size: Math.floor(Math.random() * 7) + 4
+        });
+    }
+    return pieces;
+}
+
+function spawnTrailPiece(x, y, color) {
+    const angle = Math.random() * Math.PI * 2;
+    const speedVal = Math.random() * 1.5 + 0.5;
+    const life = Math.floor(Math.random() * 13) + 18;
+    return {
+        x: x + PLAYER_SIZE / 2,
+        y: y + PLAYER_SIZE / 2,
+        vx: Math.cos(angle) * speedVal,
+        vy: Math.sin(angle) * speedVal,
+        size: Math.floor(Math.random() * 4) + 2,
+        life: life,
+        maxLife: life,
+        color: color
+    };
+}
+
+function drawHeart(ctx, x, y, color) {
+    ctx.fillStyle = color;
+    
+    // Left circle
+    ctx.beginPath();
+    ctx.arc(x + 8, y + 10, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Right circle
+    ctx.beginPath();
+    ctx.arc(x + 22, y + 10, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bottom triangle
+    ctx.beginPath();
+    ctx.moveTo(x + 2, y + 14);
+    ctx.lineTo(x + 28, y + 14);
+    ctx.lineTo(x + 15, y + 30);
+    ctx.closePath();
+    ctx.fill();
+}
+
+function drawHearts(ctx, health) {
+    for (let i = 0; i < 5; i++) {
+        const x = VIRTUAL_WIDTH - (20 + (5 - i) * 45);
+        const y = 30;
+        const color = i < health ? TEAL : "#464646";
+        drawHeart(ctx, x, y, color);
+    }
+}
+
+function handlePlayerMovement() {
+    let moving = false;
+    if (keys["KeyW"] || keys["ArrowUp"]) {
+        game.playerY -= SPEED;
+        moving = true;
+    }
+    if (keys["KeyS"] || keys["ArrowDown"]) {
+        game.playerY += SPEED;
+        moving = true;
+    }
+    if (keys["KeyA"] || keys["ArrowLeft"]) {
+        game.playerX -= SPEED;
+        moving = true;
+    }
+    if (keys["KeyD"] || keys["ArrowRight"]) {
+        game.playerX += SPEED;
+        moving = true;
+    }
+
+    game.playerX = Math.max(0, Math.min(VIRTUAL_WIDTH - PLAYER_SIZE, game.playerX));
+    game.playerY = Math.max(0, Math.min(VIRTUAL_HEIGHT - PLAYER_SIZE, game.playerY));
+    return moving;
+}
+
+function updateTrails(trailKey) {
+    const list = game[trailKey];
+    for (let i = list.length - 1; i >= 0; i--) {
+        const piece = list[i];
+        piece.x += piece.vx;
+        piece.y += piece.vy;
+
+        if (trailKey === "playerPieces") {
+            piece.vx *= 0.98;
+            piece.vy *= 0.98;
+            if (piece.x < -piece.size || piece.x > VIRTUAL_WIDTH || piece.y < -piece.size || piece.y > VIRTUAL_HEIGHT) {
+                list.splice(i, 1);
+            }
+        } else {
+            piece.life -= 1;
+            if (piece.life <= 0) {
+                list.splice(i, 1);
+            }
+        }
+    }
+}
+
+function updateEnemies(currentTime) {
+    const px = game.playerX;
+    const py = game.playerY;
+
+    if (currentTime - game.lastSpawnTime > SPAWN_DELAY) {
+        const x = Math.random() * (VIRTUAL_WIDTH - ENEMY_SIZE);
+        const y = Math.random() * (VIRTUAL_HEIGHT - ENEMY_SIZE);
+        const angle = Math.random() * Math.PI * 2;
+        const speedVal = Math.random() * 2 + 3;
+        const vx = speedVal * Math.cos(angle);
+        const vy = speedVal * Math.sin(angle);
+
+        game.telegraphs.push({ x, y, vx, vy, startTime: currentTime });
+        game.lastSpawnTime = currentTime;
+    }
+
+    for (let i = game.telegraphs.length - 1; i >= 0; i--) {
+        const t = game.telegraphs[i];
+        if (currentTime - t.startTime > TELEGRAPH_DURATION) {
+            game.enemies.push({ x: t.x, y: t.y, vx: t.vx, vy: t.vy });
+            game.telegraphs.splice(i, 1);
+        }
+    }
+
+    for (let i = game.enemies.length - 1; i >= 0; i--) {
+        const enemy = game.enemies[i];
+        enemy.x += enemy.vx;
+        enemy.y += enemy.vy;
+
+        if (enemy.x <= 0 || enemy.x >= VIRTUAL_WIDTH - ENEMY_SIZE) {
+            enemy.vx *= -1;
+        }
+        if (enemy.y <= 0 || enemy.y >= VIRTUAL_HEIGHT - ENEMY_SIZE) {
+            enemy.vy *= -1;
+        }
+
+        // AABB Collision check
+        if (px < enemy.x + ENEMY_SIZE && px + PLAYER_SIZE > enemy.x &&
+            py < enemy.y + ENEMY_SIZE && py + PLAYER_SIZE > enemy.y) {
+            
+            game.health -= 1;
+            playSound(hitSound);
+            game.enemies.splice(i, 1);
+            game.flashStartTime = currentTime;
+            game.flashAlpha = 128;
+
+            if (game.health <= 0) {
+                playSound(oofSound);
+                stopMusic();
+                game.playerPieces = createPlayerPieces(px, py);
+                game.gameOver = true;
+                game.finalSurvivalTime = Math.floor((currentTime - game.startTime) / 1000);
+
+                attempts.push(game.finalSurvivalTime);
+
+                if (game.finalSurvivalTime > highScore) {
+                    highScore = game.finalSurvivalTime;
+                }
+            }
+        }
+    }
+}
+
+let lastAmbientFrame = 0;
+const AMBIENT_FRAME_INTERVAL = 1000 / 30;
+
+function gameLoop(currentTime) {
+    if (!game.gameOver && !game.paused) {
+        const moving = handlePlayerMovement();
+
+        if (moving && currentTime - game.lastTrailTime >= TRAIL_SPAWN_DELAY) {
+            if (game.trail.length < MAX_TRAIL) {
+                game.trail.push(spawnTrailPiece(game.playerX, game.playerY, TEAL));
+            }
+            game.lastTrailTime = currentTime;
+        }
+
+        updateEnemies(currentTime);
+
+        if (currentTime - game.lastEnemyTrailTime >= ENEMY_TRAIL_SPAWN_DELAY) {
+            for (const enemy of game.enemies) {
+                if (game.enemyTrail.length < MAX_ENEMY_TRAIL) {
+                    game.enemyTrail.push(spawnTrailPiece(enemy.x, enemy.y, RED));
+                }
+            }
+            game.lastEnemyTrailTime = currentTime;
+        }
+    }
+
+    updateTrails("trail");
+    updateTrails("enemyTrail");
+    updateTrails("playerPieces");
+
+    const sumAttempts = attempts.reduce((a, b) => a + b, 0);
+    const avgTime = attempts.length > 0 ? sumAttempts / attempts.length : 0;
+
+    // RENDER
+    ctx.drawImage(bgCanvas, 0, 0);
+
+    // Draw particle trails with fewer canvas state changes.
+    for (const trailKey of ["trail", "enemyTrail"]) {
+        const color = trailKey === "trail" ? TEAL : RED;
+        ctx.fillStyle = color;
+        for (const piece of game[trailKey]) {
+            ctx.globalAlpha = piece.life / piece.maxLife;
+            ctx.fillRect(piece.x | 0, piece.y | 0, piece.size, piece.size);
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    // Telegraphs
+    for (const t of game.telegraphs) {
+        if (Math.floor(currentTime / 150) % 2 === 0) {
+            ctx.strokeStyle = RED;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(t.x, t.y, ENEMY_SIZE, ENEMY_SIZE);
+        }
+    }
+
+    // Enemies
+    for (const enemy of game.enemies) {
+        ctx.fillStyle = RED;
+        ctx.fillRect(enemy.x, enemy.y, ENEMY_SIZE, ENEMY_SIZE);
+        ctx.strokeStyle = DARK_RED;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(enemy.x, enemy.y, ENEMY_SIZE, ENEMY_SIZE);
+    }
+
+    // Player or Death Animation
+    if (!game.gameOver) {
+        ctx.fillStyle = TEAL;
+        ctx.fillRect(game.playerX, game.playerY, PLAYER_SIZE, PLAYER_SIZE);
+        ctx.strokeStyle = DARK_TEAL;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(game.playerX, game.playerY, PLAYER_SIZE, PLAYER_SIZE);
+    } else {
+        for (const piece of game.playerPieces) {
+            ctx.fillStyle = TEAL;
+            ctx.fillRect(Math.floor(piece.x), Math.floor(piece.y), piece.size, piece.size);
+            ctx.strokeStyle = DARK_TEAL;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(Math.floor(piece.x), Math.floor(piece.y), piece.size, piece.size);
+        }
+    }
+
+    // HUD
+    drawHearts(ctx, game.health);
+
+    const survivalTime = game.gameOver ? game.finalSurvivalTime : Math.floor((currentTime - game.startTime) / 1000);
+
+    ctx.fillStyle = WHITE;
+    ctx.font = "600 36px 'Octosquares', 'Segoe UI'";
+    ctx.textAlign = "left";
+    ctx.fillText(`Time: ${survivalTime}`, 20, 48);
+
+    ctx.font = "600 24px 'Octosquares', 'Segoe UI'";
+    ctx.fillText(`Best: ${highScore}`, 20, 88);
+    ctx.fillText(`Average: ${avgTime.toFixed(1)}`, 20, 120);
+
+    ctx.fillText("Press P to pause/unpause", 20, VIRTUAL_HEIGHT - 20);
+
+    ctx.textAlign = "right";
+    ctx.fillText("Avoid red at ALL COSTS", VIRTUAL_WIDTH - 20, VIRTUAL_HEIGHT - 20);
+
+    // Pause Screen Overlay
+    if (game.paused) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.47)";
+        ctx.fillRect(0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+
+        ctx.fillStyle = WHITE;
+        ctx.font = "600 48px 'Octosquares', 'Segoe UI'";
+        ctx.textAlign = "center";
+        ctx.fillText("Paused. Press P to unpause.", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2);
+    }
+
+    // Damage Flash
+    if (game.flashAlpha > 0) {
+        const elapsed = currentTime - game.flashStartTime;
+        if (elapsed < 2000) {
+            game.flashAlpha = 128 * (1 - elapsed / 2000);
+        } else {
+            game.flashAlpha = 0;
+        }
+
+        ctx.fillStyle = `rgba(255, 0, 0, ${game.flashAlpha / 255})`;
+        ctx.fillRect(0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+    }
+
+    // Game Over Overlay
+    if (game.gameOver) {
+        ctx.textAlign = "center";
+        ctx.fillStyle = RED;
+        ctx.font = "600 48px 'Octosquares', 'Segoe UI'";
+        ctx.fillText("Game Over!", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 - 10);
+
+        ctx.fillStyle = WHITE;
+        ctx.font = "600 36px 'Octosquares', 'Segoe UI'";
+        ctx.fillText("Press R to restart.", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 + 45);
+    }
+
+    // Mirror at 30fps; the low-res blur does not need a full-rate update.
+    if (currentTime - lastAmbientFrame >= AMBIENT_FRAME_INTERVAL) {
+        ambientCtx.drawImage(canvas, 0, 0, ambientCanvas.width, ambientCanvas.height);
+        lastAmbientFrame = currentTime;
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+// Start screen: the click also unlocks audio playback in the browser.
+const startOverlay = document.getElementById("startOverlay");
+startOverlay.addEventListener("click", () => {
+    audioUnlocked = true;
+    game.paused = false;
+    startOverlay.style.display = "none";
+    startRandomMusic();
+});
+
+// Start Game
+resetGame();
+game.paused = true;
+requestAnimationFrame(gameLoop);
+</script>
+
+</body>
+</html>
