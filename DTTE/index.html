@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Don't Touch the Enemies</title>
     <style>
+        @font-face {
+            font-family: "Octosquares";
+            src: url("./OctosquaresTrialMedium.ttf") format("truetype");
+            font-weight: 500;
+            font-style: normal;
+            font-display: swap;
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
@@ -19,7 +27,7 @@
             overflow: hidden;
             background-color: #050508;
             color: #ffffff;
-            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+            font-family: "Octosquares", "Segoe UI", system-ui, sans-serif;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -99,9 +107,9 @@ const ambientCanvas = document.getElementById("ambientCanvas");
 const ambientCtx = ambientCanvas.getContext("2d");
 
 // Optional sound effects and background music, stored beside this HTML file.
-const hitSound = new Audio("./hit.mp3");
-const oofSound = new Audio("./oof.mp3");
-const songs = [new Audio("./song1.mp3"), new Audio("./song2.mp3")];
+const hitSound = new Audio("./sfx/hit.mp3");
+const oofSound = new Audio("./sfx/oof.mp3");
+const songs = [new Audio("./songs/song1.mp3"), new Audio("./songs/song2.mp3")];
 [hitSound, oofSound, ...songs].forEach(audio => { audio.preload = "auto"; });
 songs.forEach(song => { song.loop = true; });
 
@@ -431,6 +439,9 @@ function updateEnemies(currentTime) {
     }
 }
 
+let lastAmbientFrame = 0;
+const AMBIENT_FRAME_INTERVAL = 1000 / 30;
+
 function gameLoop(currentTime) {
     if (!game.gameOver && !game.paused) {
         const moving = handlePlayerMovement();
@@ -464,17 +475,16 @@ function gameLoop(currentTime) {
     // RENDER
     ctx.drawImage(bgCanvas, 0, 0);
 
-    // Draw particle trails
+    // Draw particle trails with fewer canvas state changes.
     for (const trailKey of ["trail", "enemyTrail"]) {
+        const color = trailKey === "trail" ? TEAL : RED;
+        ctx.fillStyle = color;
         for (const piece of game[trailKey]) {
-            const alpha = piece.life / piece.maxLife;
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.fillStyle = piece.color;
-            ctx.fillRect(Math.floor(piece.x), Math.floor(piece.y), piece.size, piece.size);
-            ctx.restore();
+            ctx.globalAlpha = piece.life / piece.maxLife;
+            ctx.fillRect(piece.x | 0, piece.y | 0, piece.size, piece.size);
         }
     }
+    ctx.globalAlpha = 1;
 
     // Telegraphs
     for (const t of game.telegraphs) {
@@ -517,11 +527,11 @@ function gameLoop(currentTime) {
     const survivalTime = game.gameOver ? game.finalSurvivalTime : Math.floor((currentTime - game.startTime) / 1000);
 
     ctx.fillStyle = WHITE;
-    ctx.font = "600 36px 'Segoe UI'";
+    ctx.font = "600 36px 'Octosquares', 'Segoe UI'";
     ctx.textAlign = "left";
     ctx.fillText(`Time: ${survivalTime}`, 20, 48);
 
-    ctx.font = "600 24px 'Segoe UI'";
+    ctx.font = "600 24px 'Octosquares', 'Segoe UI'";
     ctx.fillText(`Best: ${highScore}`, 20, 88);
     ctx.fillText(`Average: ${avgTime.toFixed(1)}`, 20, 120);
 
@@ -536,7 +546,7 @@ function gameLoop(currentTime) {
         ctx.fillRect(0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
 
         ctx.fillStyle = WHITE;
-        ctx.font = "600 48px 'Segoe UI'";
+        ctx.font = "600 48px 'Octosquares', 'Segoe UI'";
         ctx.textAlign = "center";
         ctx.fillText("Paused. Press P to unpause.", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2);
     }
@@ -558,16 +568,19 @@ function gameLoop(currentTime) {
     if (game.gameOver) {
         ctx.textAlign = "center";
         ctx.fillStyle = RED;
-        ctx.font = "600 48px 'Segoe UI'";
+        ctx.font = "600 48px 'Octosquares', 'Segoe UI'";
         ctx.fillText("Game Over!", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 - 10);
 
         ctx.fillStyle = WHITE;
-        ctx.font = "600 36px 'Segoe UI'";
+        ctx.font = "600 36px 'Octosquares', 'Segoe UI'";
         ctx.fillText("Press R to restart.", VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 + 45);
     }
 
-    // Mirror current frame to low-res ambient canvas for dynamic side lighting
-    ambientCtx.drawImage(canvas, 0, 0, ambientCanvas.width, ambientCanvas.height);
+    // Mirror at 30fps; the low-res blur does not need a full-rate update.
+    if (currentTime - lastAmbientFrame >= AMBIENT_FRAME_INTERVAL) {
+        ambientCtx.drawImage(canvas, 0, 0, ambientCanvas.width, ambientCanvas.height);
+        lastAmbientFrame = currentTime;
+    }
 
     requestAnimationFrame(gameLoop);
 }
